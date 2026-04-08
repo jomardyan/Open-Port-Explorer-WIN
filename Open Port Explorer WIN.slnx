@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="Open Port Explorer WIN.Core/Open Port Explorer WIN.Core.csproj" />
+  <Project Path="Open Port Explorer WIN.Tests/Open Port Explorer WIN.Tests.csproj" />
+  <Project Path="Open Port Explorer WIN/Open Port Explorer WIN.csproj" />
+</Solution>

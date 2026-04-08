@@ -1,0 +1,138 @@
+name: Build and Publish
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    if: startsWith(github.ref, 'refs/tags/v') == false
+    runs-on: windows-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+          include-prerelease: true
+
+      - name: Restore dependencies
+        run: dotnet restore "Open Port Explorer WIN.slnx" --runtime win-x64
+
+      - name: Publish single-file executable
+        run: >-
+          dotnet publish "Open Port Explorer WIN/Open Port Explorer WIN.csproj"
+          --configuration Release
+          --runtime win-x64
+          --self-contained true
+          -p:PublishSingleFile=true
+          -p:EnableCompressionInSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:DebugType=none
+          -p:DebugSymbols=false
+          --output ./build-output
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-output
+          path: ./build-output/
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+          include-prerelease: true
+
+      - name: Restore dependencies
+        run: dotnet restore "Open Port Explorer WIN.slnx" --runtime win-x64
+
+      - name: Publish
+        run: >-
+          dotnet publish "Open Port Explorer WIN/Open Port Explorer WIN.csproj"
+          --configuration Release
+          --runtime win-x64
+          --self-contained true
+          -p:PublishSingleFile=true
+          -p:EnableCompressionInSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:DebugType=none
+          -p:DebugSymbols=false
+          --output ./publish
+
+      - name: Sign executable (optional)
+        continue-on-error: true
+        shell: pwsh
+        env:
+          SIGNING_CERTIFICATE_BASE64: ${{ secrets.SIGNING_CERTIFICATE_BASE64 }}
+          SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.SIGNING_CERTIFICATE_PASSWORD }}
+        run: |
+          if (-not $env:SIGNING_CERTIFICATE_BASE64) {
+            Write-Warning "SIGNING_CERTIFICATE_BASE64 secret is not set. Skipping code signing."
+            exit 0
+          }
+
+          $certBytes = [Convert]::FromBase64String($env:SIGNING_CERTIFICATE_BASE64)
+          $certPath = Join-Path $env:RUNNER_TEMP "certificate.pfx"
+          [IO.File]::WriteAllBytes($certPath, $certBytes)
+
+          $cert = $null
+          try {
+            $certPassword = ConvertTo-SecureString -String $env:SIGNING_CERTIFICATE_PASSWORD -Force -AsPlainText
+            $cert = Import-PfxCertificate -FilePath $certPath -CertStoreLocation Cert:\CurrentUser\My -Password $certPassword
+
+            $signtool = Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter "signtool.exe" |
+              Where-Object { $_.FullName -match "x64" } |
+              Sort-Object FullName -Descending |
+              Select-Object -First 1 -ExpandProperty FullName
+
+            if (-not $signtool) {
+              throw "signtool.exe not found in Windows SDK"
+            }
+
+            $exe = Get-ChildItem -Path ./publish -Filter "*.exe" | Select-Object -First 1 -ExpandProperty FullName
+
+            if (-not $exe) {
+              throw "No executable file found in publish directory"
+            }
+
+            & $signtool sign /sha1 $cert.Thumbprint /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $exe
+          }
+          finally {
+            Remove-Item $certPath -Force -ErrorAction SilentlyContinue
+            if ($cert) {
+              Remove-Item -Path "Cert:\CurrentUser\My\$($cert.Thumbprint)" -Force -ErrorAction SilentlyContinue
+            }
+          }
+
+      - name: Upload published artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: publish-output
+          path: ./publish/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ./publish/*
+          generate_release_notes: true
